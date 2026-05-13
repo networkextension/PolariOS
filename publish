@@ -1,0 +1,142 @@
+#!/bin/bash
+set -euo pipefail
+
+#───────────────────────────────────────────────
+# publish — archive, upload polarstart to ASC, push TestFlight whatsNew
+#
+# Usage:
+#   ./publish <build_number>          iOS → App Store Connect (default)
+#   ./publish <build_number> --ios    iOS → App Store Connect
+#───────────────────────────────────────────────
+
+# ── Config ──────────────────────────────────
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$REPO_ROOT/polarstart"
+PROJECT="$PROJECT_DIR/polarstart.xcodeproj"
+PBXPROJ="$PROJECT/project.pbxproj"
+SCHEME="polarstart"
+BUNDLE_ID="com.change.polarstart"
+EXPORT_STORE="$PROJECT_DIR/ExportOptions.plist"
+BUILD_DIR="$REPO_ROOT/build"
+VENV_PY="$REPO_ROOT/.publish-venv/bin/python"
+ASC_HELPER="$REPO_ROOT/asc_update_build.py"
+
+API_KEY_ID="SAZ8WF9X6U"
+API_ISSUER_ID="69a6de92-f4fa-47e3-e053-5b8c7c11a4d1"
+API_KEY_PATH="$HOME/Downloads/AuthKey_${API_KEY_ID}.p8"
+PUBLIC_GROUP_NAME="${POLARSTART_PUBLIC_GROUP:-Public Beta}"
+
+# ── Args ────────────────────────────────────
+if [ $# -lt 1 ]; then
+    echo "Usage: ./publish <build_number> [--ios]"
+    exit 1
+fi
+
+BUILD_NUMBER="$1"
+MODE="${2:---ios}"
+
+# ── Helpers ─────────────────────────────────
+step() { echo ""; echo "══════════════════════════════════════"; echo "  $1"; echo "══════════════════════════════════════"; }
+fail() { echo "❌ $1" >&2; exit 1; }
+
+# ── Preflight ───────────────────────────────
+[ -f "$PBXPROJ" ] || fail "project not found at $PBXPROJ"
+[ -f "$EXPORT_STORE" ] || fail "ExportOptions.plist missing at $EXPORT_STORE"
+[ -f "$API_KEY_PATH" ] || fail "API key not found at $API_KEY_PATH"
+[ -x "$VENV_PY" ] || fail "publish venv missing at $VENV_PY (run: python3 -m venv .publish-venv && .publish-venv/bin/pip install pyjwt cryptography requests)"
+[ -f "$ASC_HELPER" ] || fail "ASC helper missing at $ASC_HELPER"
+
+# ── Step 1: Bump build number in pbxproj ────
+step "Step 1/6 — Bump build number → $BUILD_NUMBER"
+sed -i '' "s/CURRENT_PROJECT_VERSION = [0-9][0-9]*;/CURRENT_PROJECT_VERSION = $BUILD_NUMBER;/g" "$PBXPROJ"
+MARKETING_VERSION=$(grep -m1 'MARKETING_VERSION' "$PBXPROJ" | sed -E 's/.*MARKETING_VERSION = ([^;]+);.*/\1/')
+echo "✓ Version: $MARKETING_VERSION ($BUILD_NUMBER)"
+
+# ── Step 2: Archive ─────────────────────────
+archive_ios() {
+    local archive_path="$BUILD_DIR/${SCHEME}-iOS.xcarchive"
+    step "Step 2/6 — Archive (iOS)"
+    xcodebuild archive \
+        -project "$PROJECT" \
+        -scheme "$SCHEME" \
+        -destination "generic/platform=iOS" \
+        -archivePath "$archive_path" \
+        -allowProvisioningUpdates \
+        CODE_SIGN_STYLE=Automatic \
+        DEVELOPMENT_TEAM=Z9XG3YEP93 \
+        | tail -5
+    echo "✓ Archive: $archive_path"
+}
+
+# ── Step 3: Export & upload ─────────────────
+upload_ios() {
+    local archive_path="$BUILD_DIR/${SCHEME}-iOS.xcarchive"
+    local export_path="$BUILD_DIR/export-iOS"
+    step "Step 3/6 — Export & Upload (iOS)"
+    rm -rf "$export_path"
+    xcodebuild -exportArchive \
+        -archivePath "$archive_path" \
+        -exportOptionsPlist "$EXPORT_STORE" \
+        -exportPath "$export_path" \
+        -allowProvisioningUpdates \
+        -authenticationKeyPath "$API_KEY_PATH" \
+        -authenticationKeyID "$API_KEY_ID" \
+        -authenticationKeyIssuerID "$API_ISSUER_ID" \
+        | tail -10
+    echo "✓ Uploaded: $export_path"
+}
+
+run_helper() {
+    ASC_KEY_ID="$API_KEY_ID" \
+    ASC_ISSUER_ID="$API_ISSUER_ID" \
+    ASC_KEY_PATH="$API_KEY_PATH" \
+    "$VENV_PY" "$ASC_HELPER" "$@"
+}
+
+# ── Step 4: Push TestFlight whatsNew from last commit ──
+push_whats_new() {
+    step "Step 4/6 — Update TestFlight whatsNew + compliance"
+    local whats_new_file
+    whats_new_file="$(mktemp -t polarstart_whatsnew)"
+    # Subject + body from the latest polarstart repo commit
+    git -C "$PROJECT_DIR" log -1 --pretty=format:'%s%n%n%b' > "$whats_new_file"
+    echo "✓ whatsNew preview:"
+    sed -e 's/^/    /' "$whats_new_file" | head -20
+
+    run_helper finalize "$BUNDLE_ID" "$MARKETING_VERSION" "$BUILD_NUMBER" "$whats_new_file" \
+        || echo "⚠ finalize step failed (build may still be processing — re-run later)"
+    rm -f "$whats_new_file"
+}
+
+# ── Step 5: Ensure public beta group + attach build ────
+attach_public_group() {
+    step "Step 5/6 — Attach build to public group \"$PUBLIC_GROUP_NAME\""
+    run_helper public-group "$BUNDLE_ID" "$MARKETING_VERSION" "$BUILD_NUMBER" "$PUBLIC_GROUP_NAME" \
+        || echo "⚠ public-group step failed — re-run later with: $VENV_PY $ASC_HELPER public-group $BUNDLE_ID $MARKETING_VERSION $BUILD_NUMBER \"$PUBLIC_GROUP_NAME\""
+}
+
+# ── Step 6: Submit build for beta review ───────────────
+submit_review() {
+    step "Step 6/6 — Submit for beta review"
+    run_helper submit-review "$BUNDLE_ID" "$MARKETING_VERSION" "$BUILD_NUMBER" \
+        || echo "⚠ submit-review step failed — re-run later with: $VENV_PY $ASC_HELPER submit-review $BUNDLE_ID $MARKETING_VERSION $BUILD_NUMBER"
+}
+
+# ── Run ─────────────────────────────────────
+mkdir -p "$BUILD_DIR"
+
+case "$MODE" in
+    --ios)
+        archive_ios
+        upload_ios
+        push_whats_new
+        attach_public_group
+        submit_review
+        ;;
+    *)
+        fail "Unknown mode: $MODE (only --ios supported)"
+        ;;
+esac
+
+step "Done! 🎉"
+echo "  App: polarstart $MARKETING_VERSION ($BUILD_NUMBER)"

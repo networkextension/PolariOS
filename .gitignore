@@ -1,0 +1,58 @@
+# macOS
+.DS_Store
+
+# Claude Code per-machine permission settings (skills/ stays tracked)
+.claude/settings.local.json
+
+# Each iOS sub-project is its own git repo with its own remote (e.g.
+# polarstart → ShangDynasty). They are not vendored here; clone them
+# alongside if you need them.
+/AIClick/
+/PackageTest/
+/polarstart/
+/Sword/
+/TestSystemPacketTunnel/
+
+# Xcode build / user state
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcarchive
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.swiftpm/
+Packages/
+Package.resolved
+
+# CocoaPods (none today, but future-proof)
+Pods/
+
+# Carthage
+Carthage/Build/
+
+# Fastlane (none today)
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+
+# Python venv + caches (used by publish tooling)
+.publish-venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / OS junk
+*.swp
+*~
+
+# Local secrets / API keys (never commit)
+*.p8
+*.mobileprovision
+
+# Apple Developer credentials surfaced into project dir
+ExportOptions.local.plist
