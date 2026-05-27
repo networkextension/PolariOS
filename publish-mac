@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# publish-mac — archive polarmac, sign with Developer ID, notarize, package as .dmg (and optional .pkg)
+#
+# Usage:
+#   publish-mac [--pkg] [--no-notarize] [--notary-profile NAME]
+#                [--key-id ID --issuer UUID --key-path FILE]
+#                [--out DIR] [--version X.Y.Z]
+#
+# Notarization credentials (pick one):
+#   --notary-profile NAME            keychain profile previously stored via:
+#                                    xcrun notarytool store-credentials NAME \
+#                                      --apple-id you@example.com --team-id TEAM \
+#                                      --password APP-SPECIFIC-PASSWORD
+#   --key-id ID --issuer UUID
+#   --key-path FILE                  ASC API key triple
+#   POLARMAC_NOTARY_PROFILE env      same as --notary-profile
+#
+# Identities looked up via `security find-identity -p basic -v`:
+#   "Developer ID Application: …"   for .app + .dmg signing
+#   "Developer ID Installer: …"     for .pkg signing (only when --pkg)
+#
+# Output:
+#   build-mac/polarmac-<version>.dmg
+#   build-mac/polarmac-<version>.pkg   (when --pkg)
+#
+# Reads $POLARMAC_DEVID_APP / $POLARMAC_DEVID_INSTALLER to override identity selection.
+
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJ_DIR="${SCRIPT_DIR}/polarmac"
+OUT_DIR="${SCRIPT_DIR}/build-mac"
+
+BUILD_PKG=0
+DO_NOTARIZE=1
+NOTARY_PROFILE="${POLARMAC_NOTARY_PROFILE:-}"
+KEY_ID=""
+ISSUER=""
+KEY_PATH=""
+VERSION_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pkg) BUILD_PKG=1; shift ;;
+    --no-notarize) DO_NOTARIZE=0; shift ;;
+    --notary-profile) NOTARY_PROFILE="$2"; shift 2 ;;
+    --key-id) KEY_ID="$2"; shift 2 ;;
+    --issuer) ISSUER="$2"; shift 2 ;;
+    --key-path) KEY_PATH="$2"; shift 2 ;;
+    --out) OUT_DIR="$2"; shift 2 ;;
+    --version) VERSION_OVERRIDE="$2"; shift 2 ;;
+    -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ ! -d "$PROJ_DIR" ]]; then
+  echo "expected $PROJ_DIR — run from iOS workspace root" >&2
+  exit 1
+fi
+
+cd "$PROJ_DIR"
+
+# Regenerate xcodeproj from project.yml if xcodegen is installed and yml is newer.
+if command -v xcodegen >/dev/null 2>&1; then
+  if [[ project.yml -nt polarmac.xcodeproj/project.pbxproj || ! -e polarmac.xcodeproj/project.pbxproj ]]; then
+    echo "==> regenerating xcodeproj"
+    xcodegen
+  fi
+fi
+
+# Locate identities.
+DEVID_APP="${POLARMAC_DEVID_APP:-}"
+if [[ -z "$DEVID_APP" ]]; then
+  DEVID_APP="$(security find-identity -p basic -v 2>/dev/null \
+                 | awk -F\" '/Developer ID Application/ {print $2; exit}')"
+fi
+if [[ -z "$DEVID_APP" ]]; then
+  echo "no \"Developer ID Application\" identity in keychain" >&2
+  exit 1
+fi
+echo "==> signing app with: $DEVID_APP"
+
+if [[ $BUILD_PKG -eq 1 ]]; then
+  DEVID_INSTALLER="${POLARMAC_DEVID_INSTALLER:-}"
+  if [[ -z "$DEVID_INSTALLER" ]]; then
+    DEVID_INSTALLER="$(security find-identity -p basic -v 2>/dev/null \
+                         | awk -F\" '/Developer ID Installer/ {print $2; exit}')"
+  fi
+  if [[ -z "$DEVID_INSTALLER" ]]; then
+    echo "--pkg requested but no \"Developer ID Installer\" identity in keychain" >&2
+    exit 1
+  fi
+  echo "==> signing pkg with: $DEVID_INSTALLER"
+fi
+
+# Pre-flight notarization credentials.
+if [[ $DO_NOTARIZE -eq 1 ]]; then
+  if [[ -z "$NOTARY_PROFILE" && ( -z "$KEY_ID" || -z "$ISSUER" || -z "$KEY_PATH" ) ]]; then
+    echo "notarization requires --notary-profile NAME or --key-id/--issuer/--key-path triple" >&2
+    echo "(or pass --no-notarize to skip)" >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "$OUT_DIR"
+ARCHIVE_PATH="$OUT_DIR/polarmac.xcarchive"
+EXPORT_DIR="$OUT_DIR/export"
+EXPORT_PLIST="$OUT_DIR/exportOptions.plist"
+
+# Pull team id off the chosen identity (text between trailing parens).
+TEAM_ID="$(printf %s "$DEVID_APP" | sed -nE 's/.*\(([A-Z0-9]+)\)$/\1/p')"
+
+cat >"$EXPORT_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>developer-id</string>
+  <key>teamID</key><string>${TEAM_ID}</string>
+  <key>signingStyle</key><string>manual</string>
+  <key>destination</key><string>export</string>
+</dict>
+</plist>
+EOF
+
+VERSION_ARG=()
+if [[ -n "$VERSION_OVERRIDE" ]]; then
+  VERSION_ARG=(MARKETING_VERSION="$VERSION_OVERRIDE")
+fi
+
+echo "==> xcodebuild archive"
+rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR"
+xcodebuild \
+  -project polarmac.xcodeproj \
+  -scheme polarmac \
+  -configuration Release \
+  -destination 'generic/platform=macOS' \
+  -archivePath "$ARCHIVE_PATH" \
+  CODE_SIGN_STYLE=Manual \
+  CODE_SIGN_IDENTITY="$DEVID_APP" \
+  DEVELOPMENT_TEAM="$TEAM_ID" \
+  PROVISIONING_PROFILE_SPECIFIER="" \
+  "${VERSION_ARG[@]}" \
+  archive | tail -40
+
+echo "==> xcodebuild exportArchive"
+xcodebuild -exportArchive \
+  -archivePath "$ARCHIVE_PATH" \
+  -exportPath "$EXPORT_DIR" \
+  -exportOptionsPlist "$EXPORT_PLIST" | tail -20
+
+APP_PATH="$EXPORT_DIR/polarmac.app"
+[[ -d "$APP_PATH" ]] || { echo "exportArchive did not produce $APP_PATH" >&2; exit 1; }
+
+VERSION_FROM_APP="$(defaults read "$APP_PATH/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo 1.0.0)"
+VERSION="${VERSION_OVERRIDE:-$VERSION_FROM_APP}"
+
+echo "==> codesign --verify"
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+notarize_and_staple() {
+  local target="$1"
+  echo "==> notarytool submit: $target"
+  local args=(submit "$target" --wait)
+  if [[ -n "$NOTARY_PROFILE" ]]; then
+    args+=(--keychain-profile "$NOTARY_PROFILE")
+  else
+    args+=(--key "$KEY_PATH" --key-id "$KEY_ID" --issuer "$ISSUER")
+  fi
+  xcrun notarytool "${args[@]}"
+  echo "==> stapler staple: $target"
+  xcrun stapler staple "$target"
+}
+
+# DMG.
+DMG_PATH="$OUT_DIR/polarmac-${VERSION}.dmg"
+DMG_STAGING="$OUT_DIR/dmg-staging"
+echo "==> building dmg: $DMG_PATH"
+rm -rf "$DMG_STAGING" "$DMG_PATH"
+mkdir -p "$DMG_STAGING"
+cp -R "$APP_PATH" "$DMG_STAGING/"
+ln -s /Applications "$DMG_STAGING/Applications"
+hdiutil create -volname "Polar" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH"
+codesign --sign "$DEVID_APP" --timestamp "$DMG_PATH"
+
+if [[ $DO_NOTARIZE -eq 1 ]]; then
+  notarize_and_staple "$DMG_PATH"
+fi
+
+# Optional .pkg.
+PKG_PATH=""
+if [[ $BUILD_PKG -eq 1 ]]; then
+  PKG_PATH="$OUT_DIR/polarmac-${VERSION}.pkg"
+  echo "==> building pkg: $PKG_PATH"
+  rm -f "$PKG_PATH"
+  productbuild \
+    --component "$APP_PATH" /Applications \
+    --sign "$DEVID_INSTALLER" \
+    --version "$VERSION" \
+    "$PKG_PATH"
+  if [[ $DO_NOTARIZE -eq 1 ]]; then
+    notarize_and_staple "$PKG_PATH"
+  fi
+fi
+
+rm -rf "$DMG_STAGING"
+
+echo
+echo "=== DONE ==="
+echo "app:     $APP_PATH"
+echo "dmg:     $DMG_PATH"
+[[ -n "$PKG_PATH" ]] && echo "pkg:     $PKG_PATH"
