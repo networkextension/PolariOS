@@ -21,9 +21,40 @@ final class SessionStore: ObservableObject {
     }
 
     private let authService = AuthService()
+    private var sessionExpiredObserver: NSObjectProtocol?
 
     init() {
         bootstrap()
+        // Refresh-token failure on any background request drops us
+        // back to the login screen. Notification is posted from
+        // APIClient on a non-main thread, so re-enter @MainActor.
+        sessionExpiredObserver = NotificationCenter.default.addObserver(
+            forName: .polarSessionExpired,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleSessionExpired()
+            }
+        }
+    }
+
+    deinit {
+        if let observer = sessionExpiredObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func handleSessionExpired() {
+        currentUser = nil
+        bootstrapState = .loggedOut
+        currentWorkspaceID = nil
+        lastError = NSLocalizedString("登录已过期，请重新登录", comment: "")
+        // Server already cleared cookies on a failed /api/token/refresh,
+        // but a stale access_token may still be in URLSession's jar.
+        if let cookies = HTTPCookieStorage.shared.cookies {
+            cookies.forEach { HTTPCookieStorage.shared.deleteCookie($0) }
+        }
     }
 
     func bootstrap() {
