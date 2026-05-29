@@ -1,14 +1,13 @@
 import SwiftUI
 import AppKit
 
-/// Lightweight markdown renderer tuned for chat bubbles.
-/// Handles: ATX headers (# .. ######), unordered / ordered lists, fenced
-/// code blocks, blockquotes, paragraphs. Inline formatting (bold, italic,
-/// inline code, links) goes through Apple's AttributedString markdown
-/// parser. Things we deliberately don't do: tables, nested lists,
-/// embedded HTML — chat bubbles rarely need them and they balloon
-/// complexity. Partial markup (mid-stream `**bold`) degrades gracefully
-/// to the raw characters.
+/// Markdown renderer for chat bubbles. Block parsing is custom (so we
+/// can give code blocks their own copy button and language label);
+/// inline runs go through Apple's AttributedString parser the same way
+/// iOS's `renderMarkdown(_:color:)` does, so headers / bold / italic /
+/// inline code / links land identically on both platforms. Partial
+/// markup mid-stream (e.g. unterminated `**bold`) degrades to raw
+/// characters rather than throwing.
 
 enum MarkdownBlock {
     case paragraph(String)
@@ -21,6 +20,13 @@ enum MarkdownBlock {
 
 struct MarkdownView: View {
     let text: String
+    /// Base body font size. Headers scale up relative to this.
+    let baseFontSize: CGFloat
+
+    init(text: String, baseFontSize: CGFloat = AppEnvironment.chatFontSizeDefault) {
+        self.text = text
+        self.baseFontSize = baseFontSize
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -36,29 +42,41 @@ struct MarkdownView: View {
     private func blockView(_ block: MarkdownBlock) -> some View {
         switch block {
         case .paragraph(let s):
-            inlineText(s).fixedSize(horizontal: false, vertical: true)
+            inlineText(s)
+                .font(.system(size: baseFontSize))
+                .fixedSize(horizontal: false, vertical: true)
         case .header(let level, let text):
             inlineText(text)
                 .font(headerFont(level: level))
                 .padding(.top, level <= 2 ? 4 : 2)
         case .unorderedListItem(let s):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("•").foregroundStyle(.secondary)
-                inlineText(s).fixedSize(horizontal: false, vertical: true)
+                Text("•")
+                    .font(.system(size: baseFontSize))
+                    .foregroundStyle(.secondary)
+                inlineText(s)
+                    .font(.system(size: baseFontSize))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         case .orderedListItem(let n, let s):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("\(n).").foregroundStyle(.secondary).monospacedDigit()
-                inlineText(s).fixedSize(horizontal: false, vertical: true)
+                Text("\(n).")
+                    .font(.system(size: baseFontSize))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                inlineText(s)
+                    .font(.system(size: baseFontSize))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         case .codeBlock(let lang, let content):
-            CodeBlockView(language: lang, content: content)
+            CodeBlockView(language: lang, content: content, fontSize: baseFontSize)
         case .blockquote(let s):
             HStack(alignment: .top, spacing: 8) {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(.secondary.opacity(0.5))
                     .frame(width: 3)
                 inlineText(s)
+                    .font(.system(size: baseFontSize))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -67,6 +85,9 @@ struct MarkdownView: View {
     }
 
     private func inlineText(_ s: String) -> Text {
+        // Match iOS — AttributedString(markdown:options:.full) preserves
+        // bold/italic/inline-code/link runs; we already split block-level
+        // structure ourselves so .inlineOnly is the right call here.
         if let attr = try? AttributedString(
             markdown: s,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -77,11 +98,12 @@ struct MarkdownView: View {
     }
 
     private func headerFont(level: Int) -> Font {
+        // Scale relative to baseFontSize so zoom moves headers too.
         switch level {
-        case 1: return .system(size: 20, weight: .bold)
-        case 2: return .system(size: 17, weight: .bold)
-        case 3: return .system(size: 15, weight: .bold)
-        default: return .system(size: 13, weight: .semibold)
+        case 1: return .system(size: baseFontSize * 1.5, weight: .bold)
+        case 2: return .system(size: baseFontSize * 1.3, weight: .bold)
+        case 3: return .system(size: baseFontSize * 1.15, weight: .bold)
+        default: return .system(size: baseFontSize, weight: .semibold)
         }
     }
 }
@@ -89,6 +111,7 @@ struct MarkdownView: View {
 private struct CodeBlockView: View {
     let language: String?
     let content: String
+    let fontSize: CGFloat
     @State private var copied = false
 
     var body: some View {
@@ -96,14 +119,14 @@ private struct CodeBlockView: View {
             HStack(spacing: 6) {
                 if let lang = language, !lang.isEmpty {
                     Text(lang)
-                        .font(.caption2.monospaced())
+                        .font(.system(size: max(10, fontSize - 4), design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button(action: copyToClipboard) {
                     Label(copied ? "已复制" : "复制",
                           systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .font(.caption2)
+                        .font(.system(size: max(10, fontSize - 4)))
                         .labelStyle(.titleAndIcon)
                 }
                 .buttonStyle(.plain)
@@ -114,7 +137,7 @@ private struct CodeBlockView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(content)
-                    .font(.system(.callout, design: .monospaced))
+                    .font(.system(size: fontSize, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -244,3 +267,4 @@ func parseMarkdownBlocks(_ md: String) -> [MarkdownBlock] {
     flushParagraph()
     return blocks
 }
+

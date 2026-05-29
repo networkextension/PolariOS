@@ -1,5 +1,11 @@
 import SwiftUI
 
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
 /// What the chat panel is showing. Distinct from the sidebar's `ChatTarget`
 /// so the panel can hold a full `ChatRoom`/`ChatThread` value rather than
 /// just an id.
@@ -31,6 +37,8 @@ struct ChatPanelView: View {
     @StateObject private var store = ChatPanelStore()
     @State private var draft = ""
     @State private var expandedThinking: Set<Int> = []
+    @AppStorage(AppEnvironment.chatFontSizeUserDefaultsKey)
+    private var chatFontSize: Double = Double(AppEnvironment.chatFontSizeDefault)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,7 +52,8 @@ struct ChatPanelView: View {
                                 message: msg,
                                 isOutbound: msg.senderID == session.currentUser?.userID,
                                 isThinkingExpanded: expandedThinking.contains(msg.id),
-                                toggleThinking: { toggle(msg.id) }
+                                toggleThinking: { toggle(msg.id) },
+                                fontSize: CGFloat(chatFontSize)
                             )
                             .id(msg.id)
                         }
@@ -69,6 +78,30 @@ struct ChatPanelView: View {
             store.attach(target: target, currentUserID: session.currentUser?.userID)
         }
         .onDisappear { store.detach() }
+        // Hidden buttons backing keyboard shortcuts — Cmd+= bigger, Cmd+- smaller,
+        // Cmd+0 reset. Matches the convention every Mac text app uses.
+        .background(zoomShortcuts.opacity(0))
+    }
+
+    @ViewBuilder
+    private var zoomShortcuts: some View {
+        VStack {
+            Button("Zoom In") { adjustFontSize(by: +1) }
+                .keyboardShortcut("=", modifiers: .command)
+            Button("Zoom In Plus") { adjustFontSize(by: +1) }
+                .keyboardShortcut("+", modifiers: .command)
+            Button("Zoom Out") { adjustFontSize(by: -1) }
+                .keyboardShortcut("-", modifiers: .command)
+            Button("Reset Zoom") { chatFontSize = Double(AppEnvironment.chatFontSizeDefault) }
+                .keyboardShortcut("0", modifiers: .command)
+        }
+        .frame(width: 0, height: 0)
+    }
+
+    private func adjustFontSize(by delta: CGFloat) {
+        let next = (CGFloat(chatFontSize) + delta)
+            .clamped(to: AppEnvironment.chatFontSizeMin...AppEnvironment.chatFontSizeMax)
+        chatFontSize = Double(next)
     }
 
     private var header: some View {
@@ -153,6 +186,7 @@ private struct MessageRow: View {
     let isOutbound: Bool
     let isThinkingExpanded: Bool
     let toggleThinking: () -> Void
+    let fontSize: CGFloat
 
     var body: some View {
         let (thinking, body) = splitThinking(message.content)
@@ -169,13 +203,17 @@ private struct MessageRow: View {
                             text: thinking,
                             isActive: message.streaming,
                             isExpanded: isThinkingExpanded,
-                            toggle: toggleThinking
+                            toggle: toggleThinking,
+                            fontSize: fontSize
                         )
                     }
                     if body.isEmpty && message.streaming {
-                        Text("正在生成…").italic().foregroundStyle(.secondary)
+                        Text("正在生成…")
+                            .italic()
+                            .font(.system(size: fontSize))
+                            .foregroundStyle(.secondary)
                     } else {
-                        MarkdownView(text: body)
+                        MarkdownView(text: body, baseFontSize: fontSize)
                             .textSelection(.enabled)
                     }
                 }
@@ -184,9 +222,28 @@ private struct MessageRow: View {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(isOutbound ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12))
                 )
+                // Right-click anywhere on the bubble — copy clean
+                // markdown (without <think> trail) or the raw payload.
+                .contextMenu {
+                    Button("复制") {
+                        copy(body.isEmpty ? message.content : body)
+                    }
+                    Button("复制原始内容") {
+                        copy(message.content)
+                    }
+                    if !thinking.isEmpty {
+                        Button("复制思考过程") { copy(thinking) }
+                    }
+                }
             }
             if !isOutbound { Spacer(minLength: 60) }
         }
+    }
+
+    private func copy(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
     }
 }
 
@@ -195,22 +252,25 @@ private struct ThinkingPanel: View {
     let isActive: Bool
     let isExpanded: Bool
     let toggle: () -> Void
+    let fontSize: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button(action: toggle) {
                 HStack(spacing: 4) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
+                        .font(.system(size: max(9, fontSize - 4)))
                     Text(isActive ? "正在思考…" : "思考过程")
-                        .font(.caption).fontWeight(.medium)
+                        .font(.system(size: max(10, fontSize - 3), weight: .medium))
                 }.foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
 
             if isExpanded {
                 Text(text)
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.system(size: max(10, fontSize - 2)))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 6).fill(.secondary.opacity(0.08)))

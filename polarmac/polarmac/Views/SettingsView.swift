@@ -4,6 +4,8 @@ struct SettingsView: View {
     @EnvironmentObject var session: SessionStore
     @State private var baseURL: String = AppEnvironment.apiBaseURLString()
     @StateObject private var teams = TeamPickerStore()
+    @AppStorage(AppEnvironment.chatFontSizeUserDefaultsKey)
+    private var chatFontSize: Double = Double(AppEnvironment.chatFontSizeDefault)
 
     var body: some View {
         TabView {
@@ -41,6 +43,21 @@ struct SettingsView: View {
                         Text("切换后会作为 X-Workspace-Id 发到服务端；下次拉群聊/私聊就会用这个 workspace。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                }
+
+                Section("聊天") {
+                    HStack {
+                        Text("字号")
+                        Slider(value: $chatFontSize,
+                               in: Double(AppEnvironment.chatFontSizeMin)...Double(AppEnvironment.chatFontSizeMax),
+                               step: 1)
+                        Text("\(Int(chatFontSize))").monospacedDigit().frame(width: 28)
+                        Button("默认") {
+                            chatFontSize = Double(AppEnvironment.chatFontSizeDefault)
+                        }
+                    }
+                    Text("快捷键：⌘+ 放大 / ⌘- 缩小 / ⌘0 重置。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
 
                 Section("账号") {

@@ -5,6 +5,15 @@ enum AppEnvironment {
     static let workspaceIDUserDefaultsKey = "workspaceID"
     static let lastLoginEmailUserDefaultsKey = "lastLoginEmail"
     static let infoPlistBaseURLKey = "API_BASE_URL"
+    static let chatFontSizeUserDefaultsKey = "chatFontSize"
+
+    /// Chat body font size in points. Clamped to [10, 32] by the UI
+    /// shortcuts; default 14 matches AppKit body, close enough to iOS's
+    /// .preferredFont(forTextStyle: .body) (~17 dynamic-type-medium)
+    /// that bot output reads the same on both platforms.
+    static let chatFontSizeDefault: CGFloat = 14
+    static let chatFontSizeMin: CGFloat = 10
+    static let chatFontSizeMax: CGFloat = 32
 
     static var lastLoginEmail: String? {
         get {
