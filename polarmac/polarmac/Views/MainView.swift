@@ -1,4 +1,5 @@
 import SwiftUI
+import PolarKit
 
 enum ChatTarget: Hashable, Identifiable {
     case room(Int64)

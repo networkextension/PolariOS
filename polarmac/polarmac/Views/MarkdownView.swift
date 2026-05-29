@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import PolarKit
 
 /// Markdown renderer for chat bubbles. Block parsing is custom (so we
 /// can give code blocks their own copy button and language label);

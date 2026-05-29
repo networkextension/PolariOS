@@ -1,4 +1,5 @@
 import SwiftUI
+import PolarKit
 
 struct LoginView: View {
     @EnvironmentObject var session: SessionStore

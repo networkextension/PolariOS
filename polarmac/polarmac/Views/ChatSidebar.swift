@@ -1,4 +1,5 @@
 import SwiftUI
+import PolarKit
 
 struct ChatSidebar: View {
     let rooms: [ChatRoom]

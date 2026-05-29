@@ -2,6 +2,10 @@ import SwiftUI
 
 @main
 struct PolarmacApp: App {
+    init() {
+        PolarmacBootstrap.configure()
+    }
+
     @StateObject private var session = SessionStore()
 
     var body: some Scene {
