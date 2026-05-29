@@ -184,6 +184,20 @@ final class ChatService {
         }
     }
 
+    /// Re-run the bot for a previous message. Server fans out the same
+    /// streaming pipeline; new snapshots arrive via /ws/chat under a
+    /// fresh chat_messages.id, so the row appears underneath without
+    /// touching the original. Returns the newly-created message id.
+    func retryMessage(chatID: Int, messageID: Int, completion: @escaping (Result<Int, Error>) -> Void) {
+        apiClient.requestDecodable(
+            path: "/api/chats/\(chatID)/messages/\(messageID)/retry",
+            method: "POST",
+            errorDomain: "ChatService"
+        ) { (result: Result<SendMessageResponse, Error>) in
+            completion(result.map { $0.id })
+        }
+    }
+
     func fetchBotLLMThreads(chatID: Int, completion: @escaping (Result<([BotLLMThread], BotLLMThread?), Error>) -> Void) {
         apiClient.requestDecodable(
             path: "/api/chats/\(chatID)/llm-threads",

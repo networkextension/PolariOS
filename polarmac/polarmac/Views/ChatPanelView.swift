@@ -37,6 +37,7 @@ struct ChatPanelView: View {
     @StateObject private var store = ChatPanelStore()
     @State private var draft = ""
     @State private var expandedThinking: Set<Int> = []
+    @State private var showingRawSource: Set<Int> = []
     @AppStorage(AppEnvironment.chatFontSizeUserDefaultsKey)
     private var chatFontSize: Double = Double(AppEnvironment.chatFontSizeDefault)
 
@@ -53,6 +54,10 @@ struct ChatPanelView: View {
                                 isOutbound: msg.senderID == session.currentUser?.userID,
                                 isThinkingExpanded: expandedThinking.contains(msg.id),
                                 toggleThinking: { toggle(msg.id) },
+                                isShowingRaw: showingRawSource.contains(msg.id),
+                                toggleRaw: { toggleRaw(msg.id) },
+                                canRetry: canRetry,
+                                onRetry: { store.retry(messageID: msg.id) },
                                 fontSize: CGFloat(chatFontSize)
                             )
                             .id(msg.id)
@@ -173,6 +178,21 @@ struct ChatPanelView: View {
         }
     }
 
+    private func toggleRaw(_ id: Int) {
+        if showingRawSource.contains(id) {
+            showingRawSource.remove(id)
+        } else {
+            showingRawSource.insert(id)
+        }
+    }
+
+    /// Retry only makes sense for threads — backend exposes
+    /// /api/chats/:id/messages/:id/retry but no room-level equivalent.
+    private var canRetry: Bool {
+        if case .thread = target { return true }
+        return false
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -186,7 +206,17 @@ private struct MessageRow: View {
     let isOutbound: Bool
     let isThinkingExpanded: Bool
     let toggleThinking: () -> Void
+    let isShowingRaw: Bool
+    let toggleRaw: () -> Void
+    let canRetry: Bool
+    let onRetry: () -> Void
     let fontSize: CGFloat
+
+    private var isBotReply: Bool {
+        // Bot replies always carry the llm config snapshot the server
+        // attached. User posts and shared-markdown have neither.
+        !isOutbound && (message.llmConfigID != nil || message.llmModel != nil)
+    }
 
     var body: some View {
         let (thinking, body) = splitThinking(message.content)
@@ -212,6 +242,15 @@ private struct MessageRow: View {
                             .italic()
                             .font(.system(size: fontSize))
                             .foregroundStyle(.secondary)
+                    } else if isShowingRaw {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(message.content)
+                                .font(.system(size: max(10, fontSize - 1), design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.secondary.opacity(0.10)))
                     } else {
                         MarkdownView(text: body, baseFontSize: fontSize)
                             .textSelection(.enabled)
@@ -222,8 +261,6 @@ private struct MessageRow: View {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(isOutbound ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12))
                 )
-                // Right-click anywhere on the bubble — copy clean
-                // markdown (without <think> trail) or the raw payload.
                 .contextMenu {
                     Button("复制") {
                         copy(body.isEmpty ? message.content : body)
@@ -234,16 +271,140 @@ private struct MessageRow: View {
                     if !thinking.isEmpty {
                         Button("复制思考过程") { copy(thinking) }
                     }
+                    if isBotReply {
+                        Divider()
+                        Button(isShowingRaw ? "显示渲染" : "查看原始 Markdown",
+                               action: toggleRaw)
+                        if canRetry {
+                            Button("重新生成", action: onRetry)
+                        }
+                    }
+                }
+
+                if isBotReply {
+                    metadataAndActions(body: body, thinking: thinking)
                 }
             }
             if !isOutbound { Spacer(minLength: 60) }
         }
     }
 
+    @ViewBuilder
+    private func metadataAndActions(body: String, thinking: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            metadataLine
+            actionRow(body: body, thinking: thinking)
+        }
+        .padding(.top, 2)
+    }
+
+    private var metadataLine: some View {
+        // sender · model · time · latency · tokens — same shape as webui.
+        HStack(spacing: 6) {
+            ForEach(metadataParts, id: \.self) { part in
+                if part != metadataParts.first {
+                    Text("·").foregroundStyle(.tertiary)
+                }
+                Text(part)
+            }
+        }
+        .font(.system(size: max(9, fontSize - 4)))
+        .foregroundStyle(.secondary)
+    }
+
+    private var metadataParts: [String] {
+        var parts: [String] = []
+        parts.append(message.senderUsername)
+        if let model = message.llmModel, !model.isEmpty {
+            parts.append(model)
+        }
+        parts.append(Self.formattedTimestamp(message.createdAt))
+        if let latency = message.latencyMs, latency > 0 {
+            parts.append(Self.formattedLatency(latency))
+        }
+        if let pt = message.promptTokens, let ct = message.completionTokens,
+           pt + ct > 0 {
+            parts.append("\(pt)+\(ct) tok")
+        }
+        return parts
+    }
+
+    private func actionRow(body: String, thinking: String) -> some View {
+        HStack(spacing: 12) {
+            ActionButton(systemImage: "doc.on.doc", help: "复制") {
+                copy(body.isEmpty ? message.content : body)
+            }
+            if canRetry {
+                ActionButton(systemImage: "arrow.clockwise", help: "重新生成",
+                             action: onRetry)
+            }
+            ActionButton(systemImage: isShowingRaw ? "chevron.up.square" : "chevron.left.forwardslash.chevron.right",
+                         help: isShowingRaw ? "显示渲染" : "查看原始 Markdown",
+                         action: toggleRaw)
+            ActionButton(systemImage: "square.and.arrow.up", help: "分享") {
+                share(body.isEmpty ? message.content : body)
+            }
+        }
+        .padding(.top, 2)
+    }
+
     private func copy(_ text: String) {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
+    }
+
+    private func share(_ text: String) {
+        let picker = NSSharingServicePicker(items: [text])
+        if let window = NSApp.keyWindow,
+           let view = window.contentView {
+            picker.show(relativeTo: .zero, of: view, preferredEdge: .minY)
+        }
+    }
+
+    private static func formattedTimestamp(_ iso: String) -> String {
+        // Server emits RFC3339; show "M/d/yy h:mm a" to mirror webui.
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = isoFormatter.date(from: iso)
+        if date == nil {
+            isoFormatter.formatOptions = [.withInternetDateTime]
+            date = isoFormatter.date(from: iso)
+        }
+        guard let date else { return iso }
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "M/d/yyyy, h:mm:ss a"
+        return df.string(from: date)
+    }
+
+    private static func formattedLatency(_ ms: Int) -> String {
+        if ms < 1000 { return "\(ms)ms" }
+        let seconds = Double(ms) / 1000.0
+        return String(format: "%.1fs", seconds)
+    }
+}
+
+private struct ActionButton: View {
+    let systemImage: String
+    let help: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13))
+                .foregroundStyle(hovered ? .primary : .secondary)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(hovered ? Color.secondary.opacity(0.15) : .clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
     }
 }
 
@@ -378,6 +539,19 @@ final class ChatPanelStore: ObservableObject, ChatWebSocketClientDelegate {
                 ChatLocalStore.shared.save(chatID: cacheKey, messages: self.messages)
             case .failure(let err):
                 self.error = err.localizedDescription
+            }
+        }
+    }
+
+    /// Re-run the bot for `messageID`. Thread-only — the server's
+    /// /retry endpoint isn't wired for rooms. We don't optimistically
+    /// add a placeholder: the new reply will arrive via WS like any
+    /// other streaming message.
+    func retry(messageID: Int) {
+        guard case .thread(let t) = target else { return }
+        chatService.retryMessage(chatID: t.id, messageID: messageID) { [weak self] result in
+            DispatchQueue.main.async {
+                if case .failure(let err) = result { self?.error = err.localizedDescription }
             }
         }
     }
